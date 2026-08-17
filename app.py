@@ -204,7 +204,7 @@ with tab_tech:
         q = df['Volume'].values
         p = (df['High'] + df['Low'] + df['Close']).values / 3
         df['VWAP'] = np.cumsum(p * q) / np.cumsum(q)
-        df['VWAP'] = df['VWAP'].fillna(method='bfill') # handle initial NAs
+        df['VWAP'] = df['VWAP'].bfill() # handle initial NAs
 
         # RSI (14)
         delta = df['Close'].diff()
