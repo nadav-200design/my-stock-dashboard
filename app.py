@@ -70,6 +70,22 @@ def format_large_number(num):
     except:
         return "N/A"
 
+import os
+
+# --- Portfolio Tracking Utils ---
+PORTFOLIO_FILE = "portfolio.csv"
+
+def load_portfolio():
+    if not os.path.exists(PORTFOLIO_FILE):
+        df = pd.DataFrame({"Ticker": ["AAPL"], "Shares": [10.0], "Average_Cost": [150.0]})
+        df.to_csv(PORTFOLIO_FILE, index=False)
+    else:
+        df = pd.read_csv(PORTFOLIO_FILE)
+    return df
+
+def save_portfolio(df):
+    df.to_csv(PORTFOLIO_FILE, index=False)
+
 # --- Data Fetching & Caching ---
 @st.cache_data(ttl=3600)
 def fetch_stock_data(ticker, period, interval):
@@ -172,11 +188,12 @@ intervals = ["1d", "1wk", "1mo"]
 selected_interval = st.sidebar.selectbox("Interval", intervals, index=0)
 
 # --- Main Interface Tabs ---
-tab_tech, tab_fund, tab_stmts, tab_health = st.tabs([
+tab_tech, tab_fund, tab_stmts, tab_health, tab_portfolio = st.tabs([
     "📈 Advanced Technical Terminal",
     "📊 Fundamental & Valuation Engine",
     "📑 Financial Statements Deep Dive",
-    "🛡️ Financial Health & Quality Scores"
+    "🛡️ Financial Health & Quality Scores",
+    "💼 Personal Portfolio Tracker"
 ])
 
 # --- Tab 1: 📈 Advanced Technical Terminal ---
@@ -204,7 +221,7 @@ with tab_tech:
         q = df['Volume'].values
         p = (df['High'] + df['Low'] + df['Close']).values / 3
         df['VWAP'] = np.cumsum(p * q) / np.cumsum(q)
-        df['VWAP'] = df['VWAP'].fillna(method='bfill') # handle initial NAs
+        df['VWAP'] = df['VWAP'].bfill() # handle initial NAs
 
         # RSI (14)
         delta = df['Close'].diff()
@@ -607,3 +624,84 @@ with tab_health:
     m2.metric("Operating Margin", f"{safe_float(info.get('operatingMargins'))*100:.2f}%" if info.get('operatingMargins') else "N/A")
     m3.metric("Net Margin", f"{safe_float(info.get('profitMargins'))*100:.2f}%" if info.get('profitMargins') else "N/A")
     m4.metric("Return on Assets", f"{safe_float(info.get('returnOnAssets'))*100:.2f}%" if info.get('returnOnAssets') else "N/A")
+
+# --- Tab 5: 💼 Personal Portfolio Tracker ---
+with tab_portfolio:
+    st.subheader("Personal Portfolio Tracker")
+
+    port_df = load_portfolio()
+
+    if not port_df.empty:
+        # Calculate current prices and values
+        current_prices = []
+        for ticker in port_df['Ticker']:
+            info = fetch_company_info(ticker)
+            price = safe_float(info.get('currentPrice'), 0.0)
+            if price == 0.0:
+                # Try getting last close if currentPrice isn't available
+                hist = fetch_stock_data(ticker, "1mo", "1d")
+                if not hist.empty:
+                    price = safe_float(hist['Close'].iloc[-1], 0.0)
+            current_prices.append(price)
+
+        port_df['Current_Price'] = current_prices
+        port_df['Total_Cost'] = port_df['Shares'] * port_df['Average_Cost']
+        port_df['Current_Value'] = port_df['Shares'] * port_df['Current_Price']
+        port_df['Unrealized_P&L_($)'] = port_df['Current_Value'] - port_df['Total_Cost']
+        port_df['Unrealized_P&L_(%)'] = np.where(port_df['Total_Cost'] > 0,
+                                                (port_df['Unrealized_P&L_($)'] / port_df['Total_Cost']) * 100,
+                                                0)
+
+        # Format the dataframe for display, rounding nicely
+        display_df = port_df.copy()
+        display_df['Current_Price'] = display_df['Current_Price'].round(2)
+        display_df['Total_Cost'] = display_df['Total_Cost'].round(2)
+        display_df['Current_Value'] = display_df['Current_Value'].round(2)
+        display_df['Unrealized_P&L_($)'] = display_df['Unrealized_P&L_($)'].round(2)
+        display_df['Unrealized_P&L_(%)'] = display_df['Unrealized_P&L_(%)'].round(2)
+
+        total_invested = port_df['Total_Cost'].sum()
+        total_value = port_df['Current_Value'].sum()
+        total_pl = port_df['Unrealized_P&L_($)'].sum()
+
+        total_pl_pct = (total_pl / total_invested * 100) if total_invested > 0 else 0
+
+        kpi1, kpi2, kpi3 = st.columns(3)
+        kpi1.metric("Total Portfolio Value", f"${total_value:,.2f}")
+        kpi2.metric("Total Invested", f"${total_invested:,.2f}")
+        kpi3.metric("Total Unrealized P&L", f"${total_pl:,.2f}", f"{total_pl_pct:.2f}%")
+
+        st.divider()
+        st.write("Edit your portfolio below. Changes will be saved automatically.")
+
+        # Columns to let user edit
+        # The edited_df contains the updated rows
+        edited_df = st.data_editor(
+            display_df[['Ticker', 'Shares', 'Average_Cost', 'Current_Price', 'Total_Cost', 'Current_Value', 'Unrealized_P&L_($)', 'Unrealized_P&L_(%)']],
+            num_rows="dynamic",
+            disabled=['Current_Price', 'Total_Cost', 'Current_Value', 'Unrealized_P&L_($)', 'Unrealized_P&L_(%)'],
+            use_container_width=True
+        )
+
+        # Save changes if any
+        # Create a clean save_df mapping what we need
+        save_df = edited_df[['Ticker', 'Shares', 'Average_Cost']].copy()
+        # Drop rows where Ticker is empty
+        save_df = save_df.dropna(subset=['Ticker'])
+        save_df['Ticker'] = save_df['Ticker'].astype(str).str.upper()
+
+        # Only save if there's a difference
+        # A simple check: do we need to save?
+        # For simplicity, we just save whenever this runs and the df is valid
+        save_portfolio(save_df)
+
+    else:
+        st.info("Your portfolio is empty. Add some tickers to get started.")
+        edited_df = st.data_editor(
+            pd.DataFrame(columns=['Ticker', 'Shares', 'Average_Cost']),
+            num_rows="dynamic",
+            use_container_width=True
+        )
+        save_df = edited_df.dropna(subset=['Ticker'])
+        save_df['Ticker'] = save_df['Ticker'].astype(str).str.upper()
+        save_portfolio(save_df)
